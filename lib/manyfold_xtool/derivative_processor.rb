@@ -22,46 +22,47 @@ module ManyfoldXtool
       @original_processor = original_processor
     end
 
-    def call(original, *args, **options)
-      derivatives = call_original_processor(
-        original,
-        *args,
-        **options
-      )
-
+    def call(original)
+      derivatives = call_original_processor(original)
       derivatives = {} unless derivatives.is_a?(Hash)
 
       return derivatives unless xtool_studio_file?
 
       Rails.logger.info(
-        "[manyfold-xtool] Processing XS cover for " \
-          "#{filename.inspect}"
+        "[manyfold-xtool] Processing XS cover for #{filename.inspect}"
       )
 
       cover_data = extract_cover(original)
-      return derivatives unless cover_data
 
-      preview = StringIO.new(cover_data)
-      preview.binmode
-      preview.rewind
+      unless cover_data
+        Rails.logger.warn(
+          "[manyfold-xtool] No usable project cover found"
+        )
+
+        return derivatives
+      end
+
+      render = build_render(cover_data)
+
+      result = derivatives.merge(
+        render: render
+      )
+
+      attach_cover_safely(cover_data)
 
       Rails.logger.info(
-        "[manyfold-xtool] Adding preview derivative, " \
+        "[manyfold-xtool] Returning render derivative, " \
           "#{cover_data.bytesize} bytes"
       )
 
-      derivatives.merge(
-        render: preview
-      )
+      result
     rescue StandardError => error
       Rails.logger.error(
-        "[manyfold-xtool] Derivative processor failed: " \
+        "[manyfold-xtool] Derivative processing failed: " \
           "#{error.class}: #{error.message}"
       )
 
-      Rails.logger.error(
-        error.backtrace.first(20).join("\n")
-      )
+      Rails.logger.error(error.full_message)
 
       derivatives || {}
     ensure
@@ -72,27 +73,51 @@ module ManyfoldXtool
 
     attr_reader :attacher, :original_processor
 
-    def call_original_processor(original, *args, **options)
+    def call_original_processor(original)
+      return {} unless original_processor
+
       original.rewind if original.respond_to?(:rewind)
 
-      if original_processor.nil?
-        {}
-      elsif options.empty?
-        attacher.instance_exec(
-          original,
-          *args,
-          &original_processor
-        )
-      else
-        attacher.instance_exec(
-          original,
-          *args,
-          **options,
-          &original_processor
-        )
-      end
+      result = attacher.instance_exec(
+        original,
+        &original_processor
+      )
+
+      result.is_a?(Hash) ? result : {}
     ensure
       original.rewind if original.respond_to?(:rewind)
+    end
+
+    def build_render(cover_data)
+      render = StringIO.new(cover_data)
+      render.binmode
+      render.rewind
+      render
+    end
+
+    def attach_cover_safely(cover_data)
+      source_file = attacher.record
+
+      unless source_file.is_a?(ModelFile)
+        Rails.logger.warn(
+          "[manyfold-xtool] Attacher record is not a ModelFile"
+        )
+
+        return
+      end
+
+      ManyfoldXtool::AttachProjectCover.new(
+        source_file: source_file,
+        png_data: cover_data
+      ).call
+    rescue StandardError => error
+      Rails.logger.error(
+        "[manyfold-xtool] Separate cover attachment failed, " \
+          "but render generation continues: " \
+          "#{error.class}: #{error.message}"
+      )
+
+      Rails.logger.error(error.full_message)
     end
 
     def xtool_studio_file?
@@ -101,32 +126,43 @@ module ManyfoldXtool
     end
 
     def filename
-      value = metadata["filename"].to_s
-      return value unless value.empty?
+      current_record = attacher.record
 
-      record = attacher.record
+      if current_record.respond_to?(:filename)
+        record_filename = current_record.filename.to_s
 
-      return record.path.to_s if record.respond_to?(:path)
-      return record.filename.to_s if record.respond_to?(:filename)
-      return record.name.to_s if record.respond_to?(:name)
+        return record_filename unless record_filename.empty?
+      end
 
-      ""
+      attachment_metadata["filename"].to_s
     end
 
     def mime_type
-      metadata["mime_type"].to_s
+      attachment_metadata["mime_type"].to_s
     end
 
-    def metadata
-      file = attacher.file
+    def attachment_metadata
+      current_record = attacher.record
 
-      return {} unless file.respond_to?(:metadata)
+      if current_record.respond_to?(:attachment_attacher)
+        attachment =
+          current_record.attachment_attacher.file
 
-      file.metadata || {}
+        return attachment.metadata.to_h if attachment
+      end
+
+      current_file = attacher.file
+
+      return current_file.metadata.to_h if
+        current_file.respond_to?(:metadata)
+
+      {}
     end
 
     def extract_cover(original)
-      Tempfile.create(["xtool-project", ".xs"]) do |tempfile|
+      Tempfile.create(
+        ["xtool-project", ".xs"]
+      ) do |tempfile|
         tempfile.binmode
 
         original.rewind if original.respond_to?(:rewind)
@@ -135,22 +171,12 @@ module ManyfoldXtool
         tempfile.flush
         tempfile.rewind
 
-        Rails.logger.debug(
-          "[manyfold-xtool] Temporary XS archive size: " \
-            "#{tempfile.size}"
-        )
-
         Zip::File.open(tempfile.path) do |archive|
           entry = archive.find_entry(COVER_PATH)
 
           unless entry
             Rails.logger.warn(
               "[manyfold-xtool] #{COVER_PATH} not found"
-            )
-
-            Rails.logger.debug(
-              "[manyfold-xtool] Archive entries: " \
-                "#{archive.entries.map(&:name).inspect}"
             )
 
             return nil

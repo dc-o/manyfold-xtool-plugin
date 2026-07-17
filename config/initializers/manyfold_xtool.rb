@@ -3,7 +3,7 @@
 require_relative "../../lib/manyfold_xtool/derivative_processor"
 require_relative "../../lib/file_handlers/xtool_studio_preview"
 require_relative "../../lib/manyfold_xtool/model_file_uploader_extension"
-require_relative "../../lib/manyfold_xtool/model_file_attacher_extension"
+require_relative "../../lib/manyfold_xtool/attach_project_cover"
 
 Rails.application.config.after_initialize do
 
@@ -47,20 +47,6 @@ Rails.application.config.after_initialize do
     )
   end
 
-  attacher_extension =
-    ManyfoldXtool::ModelFileAttacherExtension
-
-  unless ModelFileUploader::Attacher.ancestors.include?(
-    attacher_extension
-  )
-    ModelFileUploader::Attacher.prepend(
-      attacher_extension
-    )
-
-    Rails.logger.info(
-      "[manyfold-xtool] ModelFile attacher extension installed"
-    )
-  end
 
   handler = FileHandlers::XtoolStudioPreview
 
