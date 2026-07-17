@@ -12,4 +12,5 @@ Gem::Specification.new do |spec|
   spec.metadata = {
     "manyfold_version" => ">= 0.146.0",
   }
+  spec.add_dependency "rubyzip", "~> 3.0"
 end
